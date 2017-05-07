@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type weatherProvider interface {
@@ -14,6 +16,37 @@ type openWeatherMap struct{}
 
 type weatherUnderground struct {
 	apiKey string
+}
+
+type multiWeatherProvider []weatherProvider
+
+func (w multiWeatherProvider) temperature(city string) (float64, error) {
+	temps := make(chan float64, len(w))
+	errs := make(chan error, len(w))
+
+	for _, provider := range w {
+		go func(p weatherProvider) {
+			k, err := p.temperature(city)
+			if err != nil {
+				errs <- err
+				return
+			}
+			temps <- k
+		}(provider)
+	}
+
+	sum := 0.0
+
+	for _, provider := range w {
+		k, err := provider.temperature(city)
+		if err != nil {
+			return 0, err
+		}
+
+		sum += k
+	}
+
+	return sum / float64(len(w)), nil
 }
 
 func (w weatherUnderground) temperature(city string) (float64, error) {
@@ -84,19 +117,28 @@ type weatherData struct {
 }
 
 func main() {
-	http.HandleFunc("/", hello)
+
+	mw := multiWeatherProvider{
+		openWeatherMap{},
+		weatherUnderground{apiKey: "4bb162a377366221"},
+	}
 
 	http.HandleFunc("/weather/", func(w http.ResponseWriter, r *http.Request) {
+		begin := time.Now()
 		city := strings.SplitN(r.URL.Path, "/", 3)[2]
 
-		data, err := query(city)
+		temp, err := mw.temperature(city)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(data)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"city": city,
+			"temp": temp,
+			"took": time.Since(begin).String(),
+		})
 	})
 
 	http.ListenAndServe(":8080", nil)
